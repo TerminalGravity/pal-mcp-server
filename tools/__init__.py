@@ -14,15 +14,17 @@ from .docgen import DocgenTool
 from .listmodels import ListModelsTool
 from .planner import PlannerTool
 from .precommit import PrecommitTool
-from .projectarch import ProjectArchTool
-from .promptcompare import PromptCompareTool
 from .refactor import RefactorTool
 from .secaudit import SecauditTool
 from .testgen import TestGenTool
 from .thinkdeep import ThinkDeepTool
 from .tracer import TracerTool
-from .tradingcontext import TradingContextTool
 from .version import VersionTool
+
+# Trading development tools - standalone (see tools/trading/)
+# from .projectarch import ProjectArchTool
+# from .promptcompare import PromptCompareTool
+# from .tradingcontext import TradingContextTool
 
 __all__ = [
     "ThinkDeepTool",
@@ -43,8 +45,4 @@ __all__ = [
     "TestGenTool",
     "TracerTool",
     "VersionTool",
-    # Trading development tools (sentient-trader)
-    "ProjectArchTool",
-    "PromptCompareTool",
-    "TradingContextTool",
 ]
