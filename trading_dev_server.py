@@ -21,7 +21,10 @@ from pathlib import Path
 import httpx
 from fastmcp import FastMCP
 
-logging.basicConfig(level=logging.INFO)
+# Silence all loggers to keep stdout clean for MCP JSON-RPC protocol
+logging.basicConfig(level=logging.CRITICAL)
+for _name in ["mcp", "fastmcp", "httpx", "asyncio", "fakeredis", "docket", "docket.worker"]:
+    logging.getLogger(_name).setLevel(logging.CRITICAL)
 logger = logging.getLogger(__name__)
 
 # Configuration
@@ -380,4 +383,5 @@ def promptcompare(
 # =============================================================================
 
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    # show_banner=False keeps stdout clean for MCP JSON-RPC protocol
+    mcp.run(transport="stdio", show_banner=False)
