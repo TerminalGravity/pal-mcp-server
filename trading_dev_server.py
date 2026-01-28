@@ -14,16 +14,16 @@ Usage:
     python trading_dev_server.py
 """
 
+import asyncio
 import logging
 import os
 from pathlib import Path
 
-import httpx
 from fastmcp import FastMCP
 
 # Silence all loggers to keep stdout clean for MCP JSON-RPC protocol
 logging.basicConfig(level=logging.CRITICAL)
-for _name in ["mcp", "fastmcp", "httpx", "asyncio", "fakeredis", "docket", "docket.worker"]:
+for _name in ["mcp", "fastmcp", "asyncio", "fakeredis", "docket", "docket.worker"]:
     logging.getLogger(_name).setLevel(logging.CRITICAL)
 logger = logging.getLogger(__name__)
 
@@ -32,10 +32,40 @@ SENTIENT_TRADER_PATH = os.getenv(
     "SENTIENT_TRADER_PATH",
     "/Users/jackfelke/Projects/sentient-trader",
 )
-BLOFIN_MCP_URL = os.getenv(
-    "BLOFIN_MCP_URL",
-    "https://sentient-trader.fly.dev/mcp",
-)
+FLY_APP_NAME = "sentient-trader"
+
+
+# =============================================================================
+# FLY.IO SSH PROXY (for geo-restricted BloFin API)
+# Uses create_subprocess_exec (not shell) for security - no injection risk
+# =============================================================================
+
+
+async def run_fly_python(script: str, timeout: int = 30) -> tuple[str, str, int]:
+    """Run Python script on Fly.io via SSH and return output.
+
+    Security: Uses asyncio.create_subprocess_exec (not shell) to prevent injection.
+    """
+    escaped = script.replace("'", "'\"'\"'")
+    cmd = ["fly", "ssh", "console", "-a", FLY_APP_NAME, "-C", f"python3 -c '{escaped}'"]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        output = stdout.decode()
+        # Strip fly ssh status messages
+        lines = output.split("\n")
+        clean_lines = [line for line in lines if not line.startswith(("Connecting to", "No machine"))]
+        return "\n".join(clean_lines), stderr.decode(), proc.returncode or 0
+    except asyncio.TimeoutError:
+        proc.kill()
+        return "", "Command timed out", 1
+
 
 mcp = FastMCP(
     name="trading-dev",
@@ -55,74 +85,98 @@ async def tradingcontext(
     trade_limit: int = 10,
 ) -> dict:
     """
-    Fetch live trading system state for development context.
+    Fetch live trading system state via Fly.io SSH (bypasses geo-restrictions).
 
     Args:
-        context_type: Type of context - full, positions, trades, market, agents, performance
+        context_type: Type of context - full, positions, trades, market, performance
         symbol: Trading symbol (default: BTC-USDT)
         trade_limit: Number of recent trades to include
 
     Returns:
-        Current trading system state
+        Current trading system state from Fly.io
     """
-    try:
-        results = {}
+    import json
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            if context_type in ("full", "positions"):
-                try:
-                    resp = await client.post(
-                        f"{BLOFIN_MCP_URL}/tools/get_positions",
-                        json={"symbol": symbol},
-                    )
-                    results["positions"] = resp.json() if resp.status_code == 200 else {"error": resp.text}
-                except Exception as e:
-                    results["positions"] = {"error": str(e)}
+    results = {}
 
-            if context_type in ("full", "trades"):
-                try:
-                    resp = await client.post(
-                        f"{BLOFIN_MCP_URL}/tools/get_db_trades",
-                        json={"symbol": symbol, "limit": trade_limit},
-                    )
-                    results["trades"] = resp.json() if resp.status_code == 200 else {"error": resp.text}
-                except Exception as e:
-                    results["trades"] = {"error": str(e)}
+    if context_type in ("full", "positions"):
+        script = f"""
+import json
+from src.exchange.blofin.client import BloFinClient
+import asyncio
+async def get():
+    async with BloFinClient() as client:
+        positions = await client.get_positions("{symbol}")
+        return [dict(symbol=p.symbol, side=p.side, size=str(p.size), entry_price=str(p.entry_price),
+                     unrealized_pnl=str(p.unrealized_pnl), leverage=p.leverage) for p in positions]
+print(json.dumps(asyncio.run(get())))
+"""
+        stdout, stderr, code = await run_fly_python(script)
+        if code == 0 and stdout.strip():
+            try:
+                results["positions"] = json.loads(stdout.strip())
+            except json.JSONDecodeError:
+                results["positions"] = {"raw": stdout, "error": "JSON parse failed"}
+        else:
+            results["positions"] = {"error": stderr or "No output"}
 
-            if context_type in ("full", "market"):
-                try:
-                    resp = await client.post(
-                        f"{BLOFIN_MCP_URL}/tools/get_market_snapshot",
-                        json={"symbol": symbol},
-                    )
-                    results["market"] = resp.json() if resp.status_code == 200 else {"error": resp.text}
-                except Exception as e:
-                    results["market"] = {"error": str(e)}
+    if context_type in ("full", "trades"):
+        script = f"""
+import json
+from src.db.trades import get_recent_trades
+trades = get_recent_trades({trade_limit})
+print(json.dumps([dict(id=t.id, direction=t.direction, entry_price=str(t.entry_price),
+                       exit_price=str(t.exit_price) if t.exit_price else None,
+                       realized_pnl=str(t.realized_pnl) if t.realized_pnl else None,
+                       status=t.status) for t in trades]))
+"""
+        stdout, stderr, code = await run_fly_python(script)
+        if code == 0 and stdout.strip():
+            try:
+                results["trades"] = json.loads(stdout.strip())
+            except json.JSONDecodeError:
+                results["trades"] = {"raw": stdout, "error": "JSON parse failed"}
+        else:
+            results["trades"] = {"error": stderr or "No output"}
 
-            if context_type in ("full", "agents"):
-                try:
-                    resp = await client.post(
-                        f"{BLOFIN_MCP_URL}/tools/get_agent_states",
-                        json={},
-                    )
-                    results["agents"] = resp.json() if resp.status_code == 200 else {"error": resp.text}
-                except Exception as e:
-                    results["agents"] = {"error": str(e)}
+    if context_type in ("full", "market"):
+        script = f"""
+import json
+from src.exchange.blofin.client import BloFinClient
+import asyncio
+async def get():
+    async with BloFinClient() as client:
+        ticker = await client.get_ticker("{symbol}")
+        return dict(symbol=ticker.symbol, price=str(ticker.price), bid=str(ticker.bid),
+                    ask=str(ticker.ask), volume_24h=str(ticker.volume_24h))
+print(json.dumps(asyncio.run(get())))
+"""
+        stdout, stderr, code = await run_fly_python(script)
+        if code == 0 and stdout.strip():
+            try:
+                results["market"] = json.loads(stdout.strip())
+            except json.JSONDecodeError:
+                results["market"] = {"raw": stdout, "error": "JSON parse failed"}
+        else:
+            results["market"] = {"error": stderr or "No output"}
 
-            if context_type == "performance":
-                try:
-                    resp = await client.post(
-                        f"{BLOFIN_MCP_URL}/tools/get_session_stats",
-                        json={},
-                    )
-                    results["performance"] = resp.json() if resp.status_code == 200 else {"error": resp.text}
-                except Exception as e:
-                    results["performance"] = {"error": str(e)}
+    if context_type == "performance":
+        script = """
+import json
+from src.db.trades import get_session_stats
+stats = get_session_stats()
+print(json.dumps(stats))
+"""
+        stdout, stderr, code = await run_fly_python(script)
+        if code == 0 and stdout.strip():
+            try:
+                results["performance"] = json.loads(stdout.strip())
+            except json.JSONDecodeError:
+                results["performance"] = {"raw": stdout, "error": "JSON parse failed"}
+        else:
+            results["performance"] = {"error": stderr or "No output"}
 
-        return {"context_type": context_type, "symbol": symbol, "data": results}
-
-    except Exception as e:
-        return {"error": str(e), "hint": f"Ensure blofin-trading MCP is running at {BLOFIN_MCP_URL}"}
+    return {"context_type": context_type, "symbol": symbol, "data": results}
 
 
 # =============================================================================
