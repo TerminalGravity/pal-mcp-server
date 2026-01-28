@@ -220,7 +220,9 @@ def projectarch(
 
 PROMPT_LOCATIONS = {
     "MARKET_SCANNER_PROMPT": "src/multi_agent/sentinel.py",
-    "ANALYST_PROMPT": "src/multi_agent/analyst_pkg/prompt.py",
+    "ANALYST_PROMPT": "src/multi_agent/analyst_pkg/prompts.py",
+    "ANALYST_VWAP_PROMPT": "src/multi_agent/analyst_pkg/prompts_vwap.py",
+    "ANALYST_EMA_CLOUD_PROMPT": "src/multi_agent/analyst_pkg/prompts_ema_cloud.py",
     "EXIT_ANALYST_PROMPT": "src/multi_agent/exit_analyst.py",
     "THESIS_GUARD_PROMPT": "src/multi_agent/thesis_guard.py",
     "ARBITER_PROMPT": "src/multi_agent/arbiter.py",
